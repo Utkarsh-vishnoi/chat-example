@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>P2P File & Text Tunnel</title>
+    <style>
+      body {
+        font-family: system-ui;
+        max-width: 800px;
+        margin: 2rem auto;
+        padding: 0 1rem;
+      }
+      #chat-box {
+        border: 1px solid #ccc;
+        height: 400px;
+        overflow-y: auto;
+        padding: 1rem;
+        margin-bottom: 1rem;
+        background: #f9f9f9;
+      }
+      .msg {
+        margin-bottom: 8px;
+        padding: 8px;
+        border-radius: 4px;
+        background: white;
+        border: 1px solid #eee;
+        word-wrap: break-word;
+      }
+      .system-msg {
+        color: #888;
+        font-style: italic;
+        font-size: 0.9em;
+      }
+      .error-msg {
+        color: #d9534f;
+        font-weight: bold;
+      }
+      .controls {
+        display: flex;
+        gap: 10px;
+        margin-bottom: 10px;
+      }
+      input[type="text"] {
+        flex-grow: 1;
+        padding: 8px;
+      }
+      button {
+        padding: 8px 16px;
+        cursor: pointer;
+        background: #007bff;
+        color: white;
+        border: none;
+        border-radius: 4px;
+      }
+      button:hover {
+        background: #0056b3;
+      }
+      .download-link {
+        display: inline-block;
+        margin-top: 5px;
+        padding: 5px 10px;
+        background: #28a745;
+        color: white;
+        text-decoration: none;
+        border-radius: 4px;
+        font-size: 0.9em;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>Secure Chat & File Tunnel</h2>
+    <div id="chat-box"></div>
+
+    <div class="controls">
+      <input type="text" id="textInput" placeholder="Type a message..." />
+      <button onclick="sendText()">Send Text</button>
+    </div>
+
+    <div
+      class="controls"
+      style="background: #eee; padding: 10px; border-radius: 4px"
+    >
+      <input type="file" id="fileInput" />
+      <button onclick="sendFile()" style="background: #28a745">
+        Upload & Tunnel File
+      </button>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+      const socket = io();
+      const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
+      const chatBox = document.getElementById("chat-box");
+
+      // Alert user if the socket crashes (usually due to file size > 50mb)
+      socket.on("disconnect", (reason) => {
+        appendMessage(
+          `Disconnected from server: ${reason}. (If you just sent a file, it may have been over 50MB)`,
+          false,
+          true
+        );
+      });
+
+      // Render messages to UI
+      function appendMessage(msg, isSystem = false, isError = false) {
+        const div = document.createElement("div");
+        let className = "msg";
+        if (isSystem || msg.type === "system") className += " system-msg";
+        if (isError) className += " error-msg";
+
+        div.className = className;
+        div.textContent = msg.content || msg;
+        chatBox.appendChild(div);
+        chatBox.scrollTop = chatBox.scrollHeight;
+      }
+
+      // --- 1. TEXT HANDLING ---
+      function sendText() {
+        const input = document.getElementById("textInput");
+        if (!input.value.trim()) return;
+        socket.emit("text-message", input.value);
+        input.value = "";
+      }
+
+      socket.on("text-message", (msg) => appendMessage(msg));
+
+      socket.on("history", (rows) => {
+        rows.forEach((row) => appendMessage(row));
+      });
+
+      // --- 2. FILE UPLOAD (SENDER) ---
+      async function sendFile() {
+        const fileInput = document.getElementById("fileInput");
+        const file = fileInput.files[0];
+
+        if (!file) return alert("Please select a file first.");
+
+        if (file.size > MAX_FILE_SIZE) {
+          return alert(
+            `File is too large! Limit is 50MB. (Your file: ${(
+              file.size /
+              1024 /
+              1024
+            ).toFixed(2)} MB)`
+          );
+        }
+
+        try {
+          const arrayBuffer = await file.arrayBuffer();
+
+          socket.emit("file-transfer", {
+            name: file.name,
+            // FIX: Force a fallback MIME type if the OS doesn't provide one for .zip
+            type: file.type || "application/octet-stream",
+            size: file.size,
+            data: arrayBuffer,
+          });
+
+          appendMessage(`Sending file: ${file.name} to network...`, true);
+          fileInput.value = "";
+        } catch (err) {
+          console.error("Failed to read file", err);
+          alert("Error reading file.");
+        }
+      }
+
+      // --- 3. AUTO DOWNLOAD + UI LINK (RECEIVER) ---
+      socket.on("file-transfer", (fileObj) => {
+        console.log(`Receiving incoming file: ${fileObj.name}`);
+
+        let binaryData = fileObj.data;
+
+        // FIX: If Node.js cluster IPC converted the binary into a JSON Buffer object,
+        // we must convert it back into a raw Uint8Array before making the Blob.
+        if (
+          binaryData &&
+          binaryData.type === "Buffer" &&
+          Array.isArray(binaryData.data)
+        ) {
+          binaryData = new Uint8Array(binaryData.data);
+        }
+
+        // Reconstruct the blob safely with the corrected binary data
+        const blob = new Blob([binaryData], { type: fileObj.type });
+        const downloadUrl = URL.createObjectURL(blob);
+
+        // 1. Create a clickable button in the chat UI
+        const div = document.createElement("div");
+        div.className = "msg";
+        div.innerHTML = `<strong>Incoming File:</strong> ${fileObj.name} <br>`;
+
+        const link = document.createElement("a");
+        link.href = downloadUrl;
+        link.download = fileObj.name;
+        link.className = "download-link";
+        link.textContent = "Click to Download";
+
+        div.appendChild(link);
+        chatBox.appendChild(div);
+        chatBox.scrollTop = chatBox.scrollHeight;
+
+        // 2. Attempt the Auto-download anyway
+        try {
+          const anchor = document.createElement("a");
+          anchor.style.display = "none";
+          anchor.href = downloadUrl;
+          anchor.download = fileObj.name;
+          document.body.appendChild(anchor);
+          anchor.click();
+          document.body.removeChild(anchor);
+        } catch (e) {
+          console.warn(
+            "Auto-download was blocked by browser. User must click the link manually."
+          );
+        }
+      });
+    </script>
+  </body>
+</html>
